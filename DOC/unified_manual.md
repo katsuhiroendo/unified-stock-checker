@@ -35,7 +35,22 @@ EBAY_TOKEN=あなたの_auth_token
 ```bash
 python main.py
 ```
-メニューが表示され、eBay/Shopee の CLI モード、または GUI の起動を選択できます。
+メニューが表示され、eBay/Shopee の CLI モード、**同時実行（Run All (Parallel)）**、または GUI の起動を選択できます。
+
+---
+
+## ⚡ 同時実行（Parallel Check）機能
+
+本システムでは、eBay と Shopee の在庫チェックを同時に実行することが可能です。
+
+### GUI での同時実行
+- サイドバーの「対象プラットフォーム」で **「All (Shopee & eBay)」** を選択します。
+- 実行を開始すると、画面が左右に分割され、Shopee と eBay の進捗・メトリクスを同時に確認できます。
+- MacBook M4 Pro などの高性能なPCでは、並列実行することで全体の作業時間を大幅に短縮できます。
+
+### CLI での同時実行
+- メニューより `3. Run All (Parallel CLI)` を選択します。
+- Shopee の非同期処理と eBay のスレッド処理が並行して走り、コンソールに進捗が表示されます。
 
 ### 2. GUI ダッシュボード (Streamlit)
 直接起動する場合は以下のコマンドを実行します。
