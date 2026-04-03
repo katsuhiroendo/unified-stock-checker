@@ -1,0 +1,17 @@
+# --- Core ---
+playwright
+playwright-stealth
+streamlit
+pandas
+openpyxl
+python-dotenv
+curl-cffi
+beautifulsoup4
+
+# --- eBay ---
+ebaysdk
+
+# --- Shopee/Advanced ---
+nodriver
+cloudscraper
+requests
