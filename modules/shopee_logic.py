@@ -77,7 +77,21 @@ class BaseScraper:
         return int(cleaned) if cleaned else 0
 
     async def _fetch_and_parse(self, url: str) -> tuple[Page, any, str, int]:
-        await asyncio.sleep(random.uniform(1.0, 3.0))
+        # ドメイン別の待機時間設定（Bot検知リスクと速度のバランス）
+        domain = urlparse(url).netloc
+        DOMAIN_WAIT_MS = {
+            "jp.mercari.com": 500,
+            "paypayfleamarket.yahoo.co.jp": 600,
+            "item.fril.jp": 500,
+            "auctions.yahoo.co.jp": 800,
+            "shopping.yahoo.co.jp": 800,
+            "www.amazon.co.jp": 1500,
+            "www.biccamera.com": 1500,
+            "www.yodobashi.com": 1000,
+            "www.rakuten.co.jp": 1000,
+        }
+        wait_ms = DOMAIN_WAIT_MS.get(domain, 1000)
+        await asyncio.sleep(random.uniform(0.5, 1.5))
         page = await self.context.new_page()
         response = None
         status_code = 0
@@ -85,7 +99,7 @@ class BaseScraper:
         error_msg = ""
         try:
             response = await page.goto(url, wait_until="domcontentloaded", timeout=45000)
-            await page.wait_for_timeout(2000)
+            await page.wait_for_timeout(wait_ms)
         except Exception as e:
             error_msg = str(e)
             
@@ -495,7 +509,20 @@ class ShopeeStockChecker:
         self.user_data_dir = os.path.join(BASE_DIR, "shopee_browser_data")
         self.download_dir = os.path.join(BASE_DIR, "downloads")
         self.ready_to_upload_dir = os.path.join(BASE_DIR, "Ready_to_Upload")
-        self.max_concurrent_tasks = 8
+        self.max_concurrent_tasks = 16
+        # ドメイン別の最大並列数（Bot検知リスクに応じて調整）
+        self.domain_concurrency = {
+            "jp.mercari.com": 4,
+            "paypayfleamarket.yahoo.co.jp": 4,
+            "item.fril.jp": 3,
+            "auctions.yahoo.co.jp": 3,
+            "shopping.yahoo.co.jp": 2,
+            "store.shopping.yahoo.co.jp": 2,
+            "www.rakuten.co.jp": 2,
+            "www.amazon.co.jp": 1,
+            "www.biccamera.com": 1,
+            "www.yodobashi.com": 1,
+        }
 
     async def run_full_cycle(self, progress_callback=None, skip_price_update=False):
         async with async_playwright() as p:
@@ -519,7 +546,9 @@ class ShopeeStockChecker:
                 processed_results = []
                 def get_domain_semaphore(url_str):
                     domain = urlparse(url_str).netloc
-                    if domain not in domain_semaphores: domain_semaphores[domain] = asyncio.Semaphore(1)
+                    if domain not in domain_semaphores:
+                        limit = self.domain_concurrency.get(domain, 2)
+                        domain_semaphores[domain] = asyncio.Semaphore(limit)
                     return domain_semaphores[domain]
                 async def fetch_item(task):
                     url = task["url"]
