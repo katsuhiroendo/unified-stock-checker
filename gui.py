@@ -11,7 +11,7 @@ from openpyxl import load_workbook
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(BASE_DIR, "modules"))
 
-from shopee_logic import ShopeeStockChecker, auto_download_shopee, ShopeeLoginRequiredError
+from shopee_logic import ShopeeStockChecker, auto_upload_shopee, auto_download_shopee, ShopeeLoginRequiredError
 from ebay_logic import EbayStockChecker
 
 # ページ設定
@@ -53,6 +53,8 @@ with st.sidebar:
     headless = st.checkbox("ヘッドレスモード (ブラウザを表示しない)", value=True)
     
     skip_price_update = True
+    dry_run = True
+    auto_relist = False
     if "Shopee" in platform or "All" in platform:
         skip_price_update = st.checkbox(
             "在庫の更新のみ（価格情報を更新しない）", 
@@ -102,16 +104,21 @@ async def run_shopee(checker, callback):
         st.error(f"Shopeeエラー: {e}")
         return False
 
-def run_ebay_sync(checker, callback):
+def run_ebay_sync(checker, callback, status_cb=None):
     try:
+        if status_cb: status_cb("📡 eBay データを同期中...")
         checker.sync_ebay_data()
         import csv
         items = []
-        with open(checker.items_csv, mode="r", encoding="utf-8") as f:
-            reader = csv.DictReader(f); items = [(r["ebay_id"], r["supplier_url"]) for r in reader]
+        if os.path.exists(checker.items_csv):
+            with open(checker.items_csv, mode="r", encoding="utf-8") as f:
+                reader = csv.DictReader(f); items = [(r["ebay_id"], r["supplier_url"]) for r in reader]
+        if status_cb: status_cb(f"🔍 {len(items)} 件の在庫チェックを開始...")
         checker.run_stock_check_batch(items, callback=callback)
+        if status_cb: status_cb("✅ eBay チェック完了")
         return True
     except Exception as e:
+        if status_cb: status_cb(f"❌ エラー: {e}")
         st.error(f"eBayエラー: {e}")
         return False
 
@@ -139,20 +146,30 @@ if start_button:
             shopee_status.info("対象外")
 
         if "eBay" in platform or "All" in platform:
+            from streamlit.runtime.scriptrunner import get_script_run_ctx, add_script_run_ctx
+            ctx = get_script_run_ctx()
             ebay_checker = EbayStockChecker(dry_run=dry_run, auto_relist=auto_relist)
+            
             def ebay_cb(res, cur, tot):
-                ebay_status.markdown(f"**進捗:** {cur}/{tot} | ID: {res['ebay_id']}")
+                ebay_status.markdown(f"**🔍 チェック中:** {cur}/{tot} | ID: `{res['ebay_id']}`")
                 ebay_progress.progress(cur/tot)
                 res_data = {"display_id": res["ebay_id"], "result": {"status": "IN_STOCK" if res["status"]=="在庫あり" else "SOLD_OUT" if res["status"]=="在庫なし" else "UNKNOWN", "url": res["url"], "price": 0}}
                 st.session_state.results_ebay.append(res_data)
                 r_list = st.session_state.results_ebay
                 em1.metric("トータル", tot); em2.metric("在庫あり", len([x for x in r_list if x["result"]["status"]=="IN_STOCK"])); em3.metric("在庫無し", len([x for x in r_list if x["result"]["status"]=="SOLD_OUT"]), delta_color="inverse")
-            tasks.append(asyncio.to_thread(run_ebay_sync, ebay_checker, ebay_cb))
+            
+            def ebay_status_cb(msg):
+                ebay_status.markdown(f"**状態:** {msg}")
+            
+            def ebay_thread_wrapper():
+                add_script_run_ctx(None, ctx)
+                return run_ebay_sync(ebay_checker, ebay_cb, status_cb=ebay_status_cb)
+            
+            tasks.append(asyncio.to_thread(ebay_thread_wrapper))
         else:
             ebay_status.info("対象外")
 
         results = await asyncio.gather(*tasks)
-        if any(results): st.balloons()
         st.session_state.is_running = False
 
     loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
@@ -172,30 +189,70 @@ if st.session_state.results_shopee or st.session_state.results_ebay:
             df_s = pd.DataFrame(data_s)
             f_status_s = st.multiselect("Shopee表示フィルター", ["IN_STOCK", "SOLD_OUT", "UNKNOWN"], default=["SOLD_OUT", "UNKNOWN"], key="f_s")
             disp_s = df_s[df_s["_status"].isin(f_status_s)] if f_status_s else df_s
-            edited_s = st.data_editor(disp_s, column_config={"row_num": None, "_status": None, "ID": st.column_config.TextColumn("ID", disabled=True), "仕入価格": st.column_config.NumberColumn("仕入価格", disabled=skip_price_update), "URL": st.column_config.LinkColumn("商品ページ")}, use_container_width=True, hide_index=True, key="ed_s")
+            edited_s = st.data_editor(disp_s, column_config={"row_num": None, "_status": None, "ID": st.column_config.TextColumn("ID", disabled=True), "仕入価格": st.column_config.NumberColumn("仕入価格", disabled=skip_price_update), "URL": st.column_config.LinkColumn("商品ページ")}, width='stretch', hide_index=True, key="ed_s")
             
             if st.session_state.output_path_shopee:
                 if st.button("🚀 Shopeeへアップロード反映", type="primary"):
                     with st.spinner("反映中..."):
-                        checker = ShopeeStockChecker(headless=headless)
-                        wb = load_workbook(st.session_state.output_path_shopee); ws = wb.active
-                        final_path, _ = checker.save_manual_results(wb, ws, edited_s.to_dict('records'), skip_price_update=skip_price_update)
-                        async def up():
-                            from playwright.async_api import async_playwright
-                            async with async_playwright() as p:
-                                browser = await p.chromium.launch_persistent_context(user_data_dir=checker.user_data_dir, headless=checker.headless, args=["--disable-blink-features=AutomationControlled"])
-                                up_page = browser.pages[0] if browser.pages else await browser.new_page()
-                                success = await auto_download_shopee(up_page, final_path) if False else await auto_upload_shopee(up_page, final_path)
-                                await browser.close(); return success
-                        if asyncio.run(up()): st.success("🎉 Shopeeアップロード完了！")
+                        try:
+                            from shopee_logic import auto_upload_shopee
+                            checker = ShopeeStockChecker(headless=headless)
+                            wb = load_workbook(st.session_state.output_path_shopee); ws = wb.active
+                            final_path, _ = checker.save_manual_results(wb, ws, edited_s.to_dict('records'), skip_price_update=skip_price_update)
+                            async def up():
+                                from playwright.async_api import async_playwright
+                                async with async_playwright() as p:
+                                    browser = await p.chromium.launch_persistent_context(user_data_dir=checker.user_data_dir, headless=checker.headless, args=["--disable-blink-features=AutomationControlled"])
+                                    up_page = browser.pages[0] if browser.pages else await browser.new_page()
+                                    success = await auto_upload_shopee(up_page, final_path)
+                                    await browser.close(); return success
+                            
+                            up_loop = asyncio.new_event_loop(); asyncio.set_event_loop(up_loop)
+                            if up_loop.run_until_complete(up()): st.success("🎉 Shopeeアップロード完了！")
+                        except Exception as e:
+                            st.error(f"エラー: {e}")
         else: st.info("Shopeeの実行結果はありません。")
 
     with res_tab2:
+        # --- ファイルリンク (常に表示) ---
+        ebay_checker_inst = EbayStockChecker()
+        items_csv_path = ebay_checker_inst.items_csv
+        ended_csv_path = ebay_checker_inst.ended_items_csv
+        st.markdown("#### 📁 データファイル（手動編集対象）")
+        col_f1, col_f2 = st.columns(2)
+        with col_f1:
+            st.code(items_csv_path, language=None)
+            st.caption("出品中アイテム: `status` 列を `在庫なし` に変更→eBay取り下げ")
+        with col_f2:
+            st.code(ended_csv_path, language=None)
+            st.caption("終了済みアイテム: `status` 列を `在庫あり` に変更→eBay再出品")
+        
+        # --- 反映実行ボタン (auto_relist OFF の場合に強調) ---
+        btn_label = "🚀 eBayへ反映実行（CSV内容を同期）"
+        if not auto_relist:
+            st.warning("⚠️ 在庫復活時の自動再出品がオフです。CSVを確認・編集後、下のボタンで手動反映してください。")
+        if st.button(btn_label, type="primary", key="ebay_apply_btn"):
+            with st.spinner("eBayへ反映中..."):
+                try:
+                    checker_apply = EbayStockChecker(dry_run=dry_run, auto_relist=auto_relist)
+                    count = checker_apply.apply_csv_changes_to_ebay()
+                    if dry_run:
+                        st.success(f"✅ [DRY RUN] {count} 件の操作を検出しました（実際には反映されていません）")
+                    else:
+                        st.success(f"🎉 {count} 件を eBay へ反映しました！")
+                except Exception as e:
+                    st.error(f"エラー: {e}")
+        
+        st.markdown("---")
+        
+        # --- 結果テーブル ---
         if st.session_state.results_ebay:
             data_e = [{"ID": r["display_id"], "在庫あり": (r["result"]["status"]=="IN_STOCK"), "URL": r["result"]["url"], "_status": r["result"]["status"]} for r in st.session_state.results_ebay]
             df_e = pd.DataFrame(data_e)
             f_status_e = st.multiselect("eBay表示フィルター", ["IN_STOCK", "SOLD_OUT", "UNKNOWN"], default=["SOLD_OUT", "UNKNOWN"], key="f_e")
             disp_e = df_e[df_e["_status"].isin(f_status_e)] if f_status_e else df_e
-            st.data_editor(disp_e, column_config={"_status": None, "ID": st.column_config.TextColumn("ID", disabled=True), "URL": st.column_config.LinkColumn("商品ページ")}, use_container_width=True, hide_index=True, key="ed_e")
-            st.info("eBayの反映は在庫チェック実行時に自動（DryRunオフの場合）で行われます。")
-        else: st.info("eBayの実行結果はありません。")
+            st.data_editor(disp_e, column_config={"_status": None, "ID": st.column_config.TextColumn("ID", disabled=True), "URL": st.column_config.LinkColumn("商品ページ")}, width='stretch', hide_index=True, key="ed_e")
+        else:
+            st.info("在庫チェック後に結果が表示されます。")
+
+import csv # eBay用

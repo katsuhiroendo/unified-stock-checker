@@ -223,3 +223,62 @@ class EbayStockChecker:
             all_results.extend(revival_res)
         
         return all_results
+
+    def apply_csv_changes_to_ebay(self):
+        """
+        data/ebay/items.csv と ended_items.csv の内容を読み取り、
+        現在の CSV の状態を eBay 上に反映させる（手動反映用）。
+        """
+        import csv
+        updated_count = 0
+        
+        # 1. 出品中アイテムの在庫チェック & 取り下げ
+        if os.path.exists(self.items_csv):
+            with open(self.items_csv, mode="r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    ebay_id = row.get("ebay_id")
+                    status = row.get("status") # "在庫あり" or "在庫なし"
+                    if not ebay_id or not status: continue
+                    
+                    if status == "在庫なし":
+                        print(f"Ending item: {ebay_id}")
+                        success = self.end_ebay_item(ebay_id)
+                        if success: updated_count += 1
+
+        # 2. 終了済みアイテムの再出品（CSVで「在庫あり」に書き換えられている場合）
+        if os.path.exists(self.ended_items_csv):
+            ended_rows = []
+            with open(self.ended_items_csv, mode="r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                ended_rows = list(reader)
+
+            remaining_ended = []
+            already = self.get_already_relisted_ids()
+            
+            for row in ended_rows:
+                ebay_id = row.get("item_id") or row.get("ebay_id")
+                status = row.get("status")
+                url = row.get("supplier_url")
+                
+                if not ebay_id: continue
+
+                if status == "在庫あり" and ebay_id not in already:
+                    print(f"Relisting item: {ebay_id}")
+                    success, new_id = self.relist_ebay_item(ebay_id)
+                    if success:
+                        if not self.dry_run:
+                            self.record_relisted(ebay_id, new_id, url)
+                        updated_count += 1
+                        continue # 成功した場合は ended_items から除外
+                remaining_ended.append(row)
+            
+            # ended_items.csv を更新（再出品されたものを除く / dry_run時は更新しない）
+            if not self.dry_run and updated_count > 0:
+                with open(self.ended_items_csv, mode="w", encoding="utf-8", newline="") as f:
+                    if ended_rows:
+                        writer = csv.DictWriter(f, fieldnames=ended_rows[0].keys())
+                        writer.writeheader()
+                        writer.writerows(remaining_ended)
+
+        return updated_count

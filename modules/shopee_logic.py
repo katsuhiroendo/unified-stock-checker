@@ -154,26 +154,41 @@ class YodobashiScraper(BaseScraper):
 
 class AmazonScraper(BaseScraper):
     async def check_stock(self, url: str) -> dict:
-        from curl_cffi import requests
-        from bs4 import BeautifulSoup
-        title, status_code, error_msg, content, price, stock_status = "", 0, "", "", 0, "UNKNOWN"
+        price, stock_status = 0, "UNKNOWN"
         try:
-            await asyncio.sleep(random.uniform(1.0, 3.0))
-            def _fetch(): return requests.get(url, impersonate="chrome110", timeout=30)
-            response = await asyncio.to_thread(_fetch)
-            status_code, content = response.status_code, response.text
-            soup = BeautifulSoup(content, 'html.parser')
-            title_tag = soup.find('title')
-            if title_tag: title = title_tag.text.strip()
-            price_elem = soup.select_one('.a-price-whole')
-            if price_elem: price = self.clean_price(price_elem.text)
-            stock_status = "SOLD_OUT"
-            if "カートに入れる" in content or "今すぐ買う" in content or "予約注文する" in content or "add to cart" in content.lower():
-                stock_status = "IN_STOCK"
-        except Exception as e:
-            status_code, error_msg = 0, str(e)
+            page, response, title, status_code = await self._fetch_and_parse(url)
+            if status_code == 0 or status_code >= 400:
+                await page.close()
+                return {"url": url, "success": True, "is_fleamarket": self.is_fleamarket, "price": 0, "status": "UNKNOWN"}
             
-        if status_code == 0 or status_code >= 400:
+            content = await page.content()
+            
+            # コンテンツが小さすぎる場合は Bot 検知ページの可能性
+            if len(content) < 10000:
+                await page.close()
+                return {"url": url, "success": True, "is_fleamarket": self.is_fleamarket, "price": 0, "status": "UNKNOWN"}
+            
+            # 価格取得
+            try:
+                price_loc = page.locator('.a-price-whole').first
+                if await price_loc.count() > 0:
+                    price_text = await price_loc.text_content(timeout=3000)
+                    price = self.clean_price(price_text)
+            except: pass
+            
+            # デフォルトは UNKNOWN（安全側）
+            stock_status = "UNKNOWN"
+            
+            in_stock_keywords = ["カートに入れる", "今すぐ買う", "予約注文する", "add-to-cart-button", "買い物かごに入れる"]
+            sold_out_keywords = ["現在在庫切れです", "現在お取り扱いできません", "在庫切れ", "この商品は現在お取り扱いしておりません", "Currently unavailable"]
+            
+            if any(kw in content for kw in sold_out_keywords):
+                stock_status = "SOLD_OUT"
+            if any(kw in content for kw in in_stock_keywords):
+                stock_status = "IN_STOCK"
+            
+            await page.close()
+        except Exception as e:
             return {"url": url, "success": True, "is_fleamarket": self.is_fleamarket, "price": 0, "status": "UNKNOWN"}
         return {"url": url, "success": True, "is_fleamarket": self.is_fleamarket, "price": price, "status": stock_status}
 
@@ -192,12 +207,15 @@ class RakutenScraper(BaseScraper):
             if title_tag: title = title_tag.text.strip()
             price_elem = soup.select_one('.price2')
             if price_elem: price = self.clean_price(price_elem.text)
-            stock_status = "SOLD_OUT"
+            # デフォルトは UNKNOWN（判定できない場合は安全側）
+            stock_status = "UNKNOWN"
             import re
             if "買い物かごに入れる" in content or "ご購入手続きへ" in content or "商品をかごに追加" in content or "カートに入れる" in content:
                 stock_status = "IN_STOCK"
-            elif re.search(r'\"isEnableAddToCart\"\s*:\s*true', content) or re.search(r'\"purchaseCondition\"\s*:\s*\"enabled\"', content) or re.search(r'\"addtocart\"\s*:\s*true', content):
+            elif re.search(r'"isEnableAddToCart"\s*:\s*true', content) or re.search(r'"purchaseCondition"\s*:\s*"enabled"', content) or re.search(r'"addtocart"\s*:\s*true', content):
                 stock_status = "IN_STOCK"
+            elif "在庫切れ" in content or "品切れ" in content or "販売中止" in content or "sold out" in content.lower():
+                stock_status = "SOLD_OUT"
         except Exception as e:
             status_code, error_msg = 0, str(e)
             
@@ -218,8 +236,12 @@ class YahooShoppingScraper(BaseScraper):
                 try: price = self.clean_price(await price_loc.first.text_content(timeout=3000))
                 except: pass
             content = await page.content()
-            stock_status = "SOLD_OUT"
-            if "商品をカートに入れる" in content or "カートに入れる" in content or "予約する" in content: stock_status = "IN_STOCK"
+            # デフォルトは UNKNOWN（判定できない場合は安全側）
+            stock_status = "UNKNOWN"
+            if "商品をカートに入れる" in content or "カートに入れる" in content or "予約する" in content:
+                stock_status = "IN_STOCK"
+            elif "在庫切れ" in content or "品切れ" in content or "販売中止" in content or "買えない" in content:
+                stock_status = "SOLD_OUT"
             await page.close()
             return {"url": url, "success": True, "is_fleamarket": self.is_fleamarket, "price": price, "status": stock_status}
         except Exception as e:
