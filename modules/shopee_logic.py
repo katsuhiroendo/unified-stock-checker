@@ -85,7 +85,7 @@ class BaseScraper:
             "item.fril.jp": 500,
             "auctions.yahoo.co.jp": 800,
             "shopping.yahoo.co.jp": 800,
-            "www.amazon.co.jp": 1500,
+            "www.amazon.co.jp": 2000,
             "www.biccamera.com": 1500,
             "www.yodobashi.com": 1000,
             "www.rakuten.co.jp": 1000,
@@ -551,13 +551,20 @@ class ShopeeStockChecker:
                 user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
                 locale="ja-JP"
             )
-            # EC系用ブラウザ（低並列・高待機）
+            await ctx_fleamarket.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
+            # EC系用ブラウザ（低並列・高待機・Bot検知対策強化）
             browser_ec = await p.chromium.launch(headless=self.headless,
                 args=["--disable-blink-features=AutomationControlled"])
             ctx_ec = await browser_ec.new_context(
                 user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
                 locale="ja-JP"
             )
+            await ctx_ec.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
+                Object.defineProperty(navigator, 'languages', {get: () => ['ja-JP','ja','en-US','en']});
+                window.chrome = {runtime: {}};
+            """)
 
             try:
                 page = shopee_browser.pages[0] if shopee_browser.pages else await shopee_browser.new_page()
