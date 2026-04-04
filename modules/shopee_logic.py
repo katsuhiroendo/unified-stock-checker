@@ -167,43 +167,60 @@ class YodobashiScraper(BaseScraper):
         return {"url": url, "success": True, "is_fleamarket": self.is_fleamarket, "price": price, "status": stock_status}
 
 class AmazonScraper(BaseScraper):
+    MAX_RETRIES = 2  # Bot検知時の最大リトライ回数
+
     async def check_stock(self, url: str) -> dict:
         price, stock_status = 0, "UNKNOWN"
-        try:
-            page, response, title, status_code = await self._fetch_and_parse(url)
-            if status_code == 0 or status_code >= 400:
-                await page.close()
-                return {"url": url, "success": True, "is_fleamarket": self.is_fleamarket, "price": 0, "status": "UNKNOWN"}
-            
-            content = await page.content()
-            
-            # コンテンツが小さすぎる場合は Bot 検知ページの可能性
-            if len(content) < 10000:
-                await page.close()
-                return {"url": url, "success": True, "is_fleamarket": self.is_fleamarket, "price": 0, "status": "UNKNOWN"}
-            
-            # 価格取得
+        for attempt in range(self.MAX_RETRIES + 1):
             try:
-                price_loc = page.locator('.a-price-whole').first
-                if await price_loc.count() > 0:
-                    price_text = await price_loc.text_content(timeout=3000)
-                    price = self.clean_price(price_text)
-            except: pass
-            
-            # デフォルトは UNKNOWN（安全側）
-            stock_status = "UNKNOWN"
-            
-            in_stock_keywords = ["カートに入れる", "今すぐ買う", "予約注文する", "add-to-cart-button", "買い物かごに入れる"]
-            sold_out_keywords = ["現在在庫切れです", "現在お取り扱いできません", "在庫切れ", "この商品は現在お取り扱いしておりません", "Currently unavailable"]
-            
-            if any(kw in content for kw in sold_out_keywords):
-                stock_status = "SOLD_OUT"
-            if any(kw in content for kw in in_stock_keywords):
-                stock_status = "IN_STOCK"
-            
-            await page.close()
-        except Exception as e:
-            return {"url": url, "success": True, "is_fleamarket": self.is_fleamarket, "price": 0, "status": "UNKNOWN"}
+                page, response, title, status_code = await self._fetch_and_parse(url)
+                if status_code == 0 or status_code >= 400:
+                    await page.close()
+                    if attempt < self.MAX_RETRIES:
+                        await asyncio.sleep(3.0 * (attempt + 1))
+                        continue
+                    return {"url": url, "success": True, "is_fleamarket": self.is_fleamarket, "price": 0, "status": "UNKNOWN"}
+
+                content = await page.content()
+
+                # コンテンツが小さすぎる場合は Bot 検知ページ → リトライ
+                if len(content) < 10000:
+                    await page.close()
+                    if attempt < self.MAX_RETRIES:
+                        wait_sec = 4.0 * (attempt + 1)
+                        logger.info(f"Amazon Bot検知 (試行{attempt+1}/{self.MAX_RETRIES+1}): {url} -> {wait_sec}秒後にリトライ")
+                        await asyncio.sleep(wait_sec)
+                        continue
+                    logger.warning(f"Amazon Bot検知: リトライ上限に達しました -> UNKNOWN: {url}")
+                    return {"url": url, "success": True, "is_fleamarket": self.is_fleamarket, "price": 0, "status": "UNKNOWN"}
+
+                # 価格取得
+                try:
+                    price_loc = page.locator('.a-price-whole').first
+                    if await price_loc.count() > 0:
+                        price_text = await price_loc.text_content(timeout=3000)
+                        price = self.clean_price(price_text)
+                except: pass
+
+                # デフォルトは UNKNOWN（安全側）
+                stock_status = "UNKNOWN"
+
+                in_stock_keywords = ["カートに入れる", "今すぐ買う", "予約注文する", "add-to-cart-button", "買い物かごに入れる"]
+                sold_out_keywords = ["現在在庫切れです", "現在お取り扱いできません", "在庫切れ", "この商品は現在お取り扱いしておりません", "Currently unavailable"]
+
+                if any(kw in content for kw in sold_out_keywords):
+                    stock_status = "SOLD_OUT"
+                if any(kw in content for kw in in_stock_keywords):
+                    stock_status = "IN_STOCK"
+
+                await page.close()
+                break  # 成功したのでリトライループを抜ける
+
+            except Exception as e:
+                if attempt < self.MAX_RETRIES:
+                    await asyncio.sleep(3.0 * (attempt + 1))
+                    continue
+                return {"url": url, "success": True, "is_fleamarket": self.is_fleamarket, "price": 0, "status": "UNKNOWN"}
         return {"url": url, "success": True, "is_fleamarket": self.is_fleamarket, "price": price, "status": stock_status}
 
 class RakutenScraper(BaseScraper):
