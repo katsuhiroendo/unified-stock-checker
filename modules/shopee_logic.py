@@ -525,49 +525,132 @@ class ShopeeStockChecker:
         }
 
     async def run_full_cycle(self, progress_callback=None, skip_price_update=False):
+        # ===============================================
+        # Phase 2-1: フリマ系とEC系でブラウザを分離
+        # ===============================================
+        FLEAMARKET_DOMAINS = {
+            "jp.mercari.com", "paypayfleamarket.yahoo.co.jp",
+            "item.fril.jp", "auctions.yahoo.co.jp",
+        }
+
+        def get_context_for_url(url, ctx_fleamarket, ctx_ec):
+            domain = urlparse(url).netloc
+            return ctx_fleamarket if domain in FLEAMARKET_DOMAINS else ctx_ec
+
         async with async_playwright() as p:
-            browser = await p.chromium.launch_persistent_context(
+            # Shopeeログイン用の永続コンテキスト
+            shopee_browser = await p.chromium.launch_persistent_context(
                 user_data_dir=self.user_data_dir,
                 headless=self.headless,
                 args=["--disable-blink-features=AutomationControlled"]
             )
+            # フリマ系用ブラウザ（高並列・低待機）
+            browser_fleamarket = await p.chromium.launch(headless=self.headless,
+                args=["--disable-blink-features=AutomationControlled"])
+            ctx_fleamarket = await browser_fleamarket.new_context(
+                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                locale="ja-JP"
+            )
+            # EC系用ブラウザ（低並列・高待機）
+            browser_ec = await p.chromium.launch(headless=self.headless,
+                args=["--disable-blink-features=AutomationControlled"])
+            ctx_ec = await browser_ec.new_context(
+                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                locale="ja-JP"
+            )
+
             try:
-                page = browser.pages[0] if browser.pages else await browser.new_page()
+                page = shopee_browser.pages[0] if shopee_browser.pages else await shopee_browser.new_page()
                 if progress_callback: progress_callback("Shopeeから最新データを取得中...", 0, 100)
                 latest_file = await auto_download_shopee(page, self.download_dir)
                 wb = openpyxl.load_workbook(latest_file)
                 ws = wb.active
                 tasks = self._extract_tasks(ws)
-                total = len(tasks)
-                if progress_callback: progress_callback(f"チェック対象: {total} 件発見", 0, total)
+
+                # ===============================================
+                # Phase 2-2: 実行前に重複URLを排除
+                # ===============================================
+                seen_urls = {}
+                deduped_tasks = []
+                skipped = 0
+                for t in tasks:
+                    url = t["url"]
+                    if url not in seen_urls:
+                        seen_urls[url] = t["display_id"]
+                        deduped_tasks.append(t)
+                    else:
+                        skipped += 1
+                if skipped > 0:
+                    logger.info(f"重複URL {skipped} 件を除外 (ユニーク: {len(deduped_tasks)} 件)")
+
+                total = len(deduped_tasks)
+                if progress_callback: progress_callback(f"チェック対象: {total} 件 (重複除外: {skipped} 件)", 0, total)
+
                 domain_semaphores = {}
                 global_semaphore = asyncio.Semaphore(self.max_concurrent_tasks)
                 url_cache = {}
                 processed_results = []
+
+                # ===============================================
+                # Phase 2-3: チェックポイント設定
+                # ===============================================
+                CHECKPOINT_INTERVAL = 100
+                checkpoint_dir = os.path.join(BASE_DIR, "data", "shopee", "checkpoints")
+                os.makedirs(checkpoint_dir, exist_ok=True)
+                checkpoint_file = os.path.join(checkpoint_dir, "progress.json")
+
                 def get_domain_semaphore(url_str):
                     domain = urlparse(url_str).netloc
                     if domain not in domain_semaphores:
                         limit = self.domain_concurrency.get(domain, 2)
                         domain_semaphores[domain] = asyncio.Semaphore(limit)
                     return domain_semaphores[domain]
+
                 async def fetch_item(task):
                     url = task["url"]
                     if url not in url_cache:
                         async def _do():
+                            ctx = get_context_for_url(url, ctx_fleamarket, ctx_ec)
                             async with global_semaphore, get_domain_semaphore(url):
-                                return await ScraperFactory.get_scraper(url, browser).check_stock(url)
+                                return await ScraperFactory.get_scraper(url, ctx).check_stock(url)
                         url_cache[url] = asyncio.create_task(_do())
                     res = await url_cache[url]
                     item_res = {"row_num": task["row_num"], "display_id": task["display_id"], "result": res}
                     processed_results.append(item_res)
-                    if progress_callback: progress_callback(f"進捗: {len(processed_results)}/{total}", len(processed_results), total, processed_results)
+                    count = len(processed_results)
+                    if progress_callback:
+                        progress_callback(f"進捗: {count}/{total}", count, total, processed_results)
+
+                    # チェックポイント保存
+                    if count % CHECKPOINT_INTERVAL == 0:
+                        import json
+                        try:
+                            with open(checkpoint_file, "w", encoding="utf-8") as f:
+                                json.dump({"completed": count, "total": total}, f)
+                            logger.info(f"チェックポイント保存: {count}/{total} 件完了")
+                        except Exception:
+                            pass
                     return item_res
-                await asyncio.gather(*(fetch_item(t) for t in tasks))
+
+                await asyncio.gather(*(fetch_item(t) for t in deduped_tasks))
+
+                # チェックポイントファイルを削除（正常完了）
+                try:
+                    if os.path.exists(checkpoint_file):
+                        os.remove(checkpoint_file)
+                except Exception:
+                    pass
+
                 if progress_callback: progress_callback("結果をExcelに保存中...", total, total, processed_results)
                 output_path, summary = self._save_results(wb, ws, processed_results, skip_price_update=skip_price_update)
                 return output_path, summary, page
             finally:
-                if not progress_callback: await browser.close()
+                await ctx_fleamarket.close()
+                await ctx_ec.close()
+                await browser_fleamarket.close()
+                await browser_ec.close()
+                if not progress_callback: await shopee_browser.close()
+
 
     def _extract_tasks(self, ws):
         sku_cols = []
