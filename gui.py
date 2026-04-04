@@ -42,6 +42,8 @@ if "results_ebay" not in st.session_state: st.session_state.results_ebay = []
 if "output_path_shopee" not in st.session_state: st.session_state.output_path_shopee = None
 if "is_running" not in st.session_state: st.session_state.is_running = False
 if "platform" not in st.session_state: st.session_state.platform = "Shopee"
+if "elapsed_time" not in st.session_state: st.session_state.elapsed_time = None
+if "start_time" not in st.session_state: st.session_state.start_time = None
 
 # サイドバー
 with st.sidebar:
@@ -74,6 +76,11 @@ with st.sidebar:
 # メイン画面 (同時実行時は2カラムレイアウト)
 st.subheader(f"🚀 {platform} 操作")
 start_button = st.button(f"在庫チェックを開始", disabled=st.session_state.is_running)
+
+# 経過時間表示エリア
+elapsed_placeholder = st.empty()
+if st.session_state.elapsed_time:
+    elapsed_placeholder.success(f"⏱️ 前回の処理時間: {st.session_state.elapsed_time}")
 
 # プレースホルダー作成
 p_col1, p_col2 = st.columns(2)
@@ -123,10 +130,14 @@ def run_ebay_sync(checker, callback, status_cb=None):
         return False
 
 if start_button:
+    import time
     st.session_state.is_running = True
     st.session_state.results_shopee = []
     st.session_state.results_ebay = []
     st.session_state.output_path_shopee = None
+    st.session_state.elapsed_time = None
+    st.session_state.start_time = time.time()
+    elapsed_placeholder.info("⏱️ 計測中...")
 
     async def start_all():
         tasks = []
@@ -171,6 +182,16 @@ if start_button:
 
         results = await asyncio.gather(*tasks)
         st.session_state.is_running = False
+        # 経過時間を計算して保存
+        import time
+        elapsed_sec = time.time() - st.session_state.start_time
+        minutes = int(elapsed_sec // 60)
+        seconds = int(elapsed_sec % 60)
+        if minutes > 0:
+            st.session_state.elapsed_time = f"{minutes}分 {seconds}秒"
+        else:
+            st.session_state.elapsed_time = f"{seconds}秒"
+        elapsed_placeholder.success(f"⏱️ 処理時間: {st.session_state.elapsed_time}")
 
     loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
     loop.run_until_complete(start_all())
