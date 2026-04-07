@@ -1,7 +1,7 @@
-# Unified Stock Checker システム 統合マニュアル (v3.0)
+# Unified Stock Checker システム 統合マニュアル (v4.0)
 
 本システムは、eBay と Shopee の在庫・出品状況を一つのインターフェースで管理できるツールです。
-各プラットフォームの主要ロジックを抽出・整理し、GUI および CLI 両方から操作が可能です。
+最新バージョンでは、バックグラウンドでの**完全自動監視機能**が追加されました。
 
 ---
 
@@ -29,63 +29,65 @@ EBAY_TOKEN=あなたの_auth_token
 
 ## 🏃‍♂️ 起動方法
 
-### 1. CLI メニュー
-ターミナルから `main.py` を実行します。
-
-```bash
-python main.py
-```
-メニューが表示され、eBay/Shopee の CLI モード、**同時実行（Run All (Parallel)）**、または GUI の起動を選択できます。
-
----
-
-## ⚡ 同時実行（Parallel Check）機能
-
-本システムでは、eBay と Shopee の在庫チェックを同時に実行することが可能です。
-
-### GUI での同時実行
-- サイドバーの「対象プラットフォーム」で **「All (Shopee & eBay)」** を選択します。
-- 実行を開始すると、画面が左右に分割され、Shopee と eBay の進捗・メトリクスを同時に確認できます。
-- MacBook M4 Pro などの高性能なPCでは、並列実行することで全体の作業時間を大幅に短縮できます。
-
-### CLI での同時実行
-- メニューより `3. Run All (Parallel CLI)` を選択します。
-- Shopee の非同期処理と eBay のスレッド処理が並行して走り、コンソールに進捗が表示されます。
-
-### 2. GUI ダッシュボード (Streamlit)
-直接起動する場合は以下のコマンドを実行します。
+### GUI ダッシュボード (Streamlit)
+本システムのメイン操作画面です。
 
 ```bash
 streamlit run gui.py
 ```
-ブラウザが起動し、サイドバーから eBay と Shopee を切り替えて操作が可能です。
+ブラウザでダッシュボードが開き、サイドバーから各機能へアクセスできます。
+
+---
+
+## 🤖 自動監視モード (Automated Monitoring)
+
+サイドバーの「🤖 自動監視設定」から有効化できます。
+
+### 主な機能
+- **定期実行**: 設定した周期（デフォルト4時間）ごとに、eBay と Shopee の在庫を自動でチェックします。
+- **リアルタイムログ**: サイドバーの「🛡️ 監視ログ」コンソールに、現在の実行状況がリアルタイムで表示されます。
+- **完全自動アクション**:
+  - **eBay**: 在庫切れ商品の自動取り下げ、および在庫復活商品の自動再出品を行います。
+  - **Shopee**: データの自動ダウンロード、在庫状況（0または1）の更新、および自動アップロードを一気通貫で行います。
+
+### ログの確認
+実行結果は以下のファイルにも保存されます。
+- `logs/auto_monitor_YYYYMMDD.log`: 自動監視の動作履歴
+
+---
+
+## ⚡ 手動実行・同時実行（Parallel Check）
+
+### GUI での同時実行
+- サイドバーの「対象プラットフォーム」で **「All (Shopee & eBay)」** を選択します。
+- 実行を開始すると、画面が左右に分割され、進捗を同時に確認できます。
+
+### CLI メニュー
+ターミナルから `main.py` を実行することで、CLI モードでの操作も可能です。
 
 ---
 
 ## 📂 フォルダ構成
 
-- `main.py`: メインメニュー（CLI/GUI起動）
-- `gui.py`: 統合ダッシュボード (Streamlit)
+- `gui.py`: 統合ダッシュボード (Streamlit) / 自動監視エンジン
 - `modules/`: プラットフォーム別のコアロジック
-- `data/`: 出品データやログ（プラットフォーム別にサブフォルダ管理）
-  - `ebay/`: items.csv, ended_items.csv, relisted_log.txt
-  - `shopee/`: (Shopeeのデータ管理用)
+- `data/`: 出品データやチェックポイント
+  - `ebay/`: items.csv (出品中), ended_items.csv (終了済み)
+  - `shopee/`: (Shopee管理データ)
 - `logs/`: 実行ログ、スクレイピング履歴
+- `downloads/`: Shopeeから自動ダウンロードされた最新データ
 - `Ready_to_Upload/`: Shopeeアップロード用Excelファイルの出力先
 
 ---
 
-## 💡 各ツールの特徴
+## 💡 システムの特徴
 
-### eBay Stock Checker
-- **Phase 1 (Sync)**: eBay API から最新出品を取得。
-- **Phase 2 (Active Check)**: 出品中アイテムの在庫確認。
-- **Phase 3 (Revival Check)**: 終了済みアイテムの在庫復活確認。
+### eBay 管理
+- **Sync/Check/Revival**: API連携による高速な同期と、終了済み商品の復活検知に対応。
 
-### Shopee Stock Checker
-- **Auto DL/UL**: Shopee セラーセンターからデータを自動ダウンロード・アップロード。
-- **Scraper Factory**: メルカリ、ヤフオク、ヤフーフリマ、楽天ラクマ、Amazon、ヨドバシ等の高度なスクレイピングに対応。
-- **Manual Override**: GUI 上で在庫状態の手動上書きが可能。
+### Shopee 管理
+- **Auto DL/UL**: セラーセンターへの自動ログイン・データ処理。
+- **Scraper Factory**: メルカリ、ヤフオク、ヤフーフリマ、楽天ラクマ、Amazon、ヨドバシ等の高度なスクレイピング。
 
 ---
 © 2026 Unified Stock Automation Project

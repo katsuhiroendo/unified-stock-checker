@@ -57,9 +57,10 @@ openpyxl.worksheet.views.Pane.state = String(allow_none=True)
 # ==========================================
 class FinanceCalculator:
     @staticmethod
-    def calculate_shopee_price(purchase_price: int, is_fleamarket: bool) -> int:
+    def calculate_shopee_price(purchase_price: int, is_fleamarket: bool, shipping: int = 1800, margin_rate: float = 0.4327) -> int:
         if is_fleamarket: return purchase_price
-        return round((purchase_price + 1800) / (1 - 0.4327))
+        # margin_rate includes both Shopee fees and desired profit margin
+        return round((purchase_price + shipping) / (1 - margin_rate))
 
 # ==========================================
 # スクレイピングの基底クラス
@@ -295,19 +296,43 @@ class MercariScraper(BaseScraper):
                 try: price = self.clean_price(await price_loc.first.text_content(timeout=3000))
                 except: pass
             stock_status = "SOLD_OUT"
-            buy_btns = page.locator('text="購入手続きへ"')
-            btn_count = await buy_btns.count()
-            for i in range(btn_count):
-                btn = buy_btns.nth(i)
-                if await btn.is_visible():
+            
+            # --- 判定ロジック強化 ---
+            # 1. [data-testid="checkout-button"] による直接判定 (推奨)
+            checkout_box = page.locator('[data-testid="checkout-button"]')
+            if await checkout_box.count() > 0:
+                btn = checkout_box.locator('button').first
+                if await btn.count() > 0 and await btn.is_visible():
                     is_disabled = await btn.evaluate('el => el.disabled || el.hasAttribute("disabled") || el.getAttribute("aria-disabled") === "true"')
                     if not is_disabled:
                         stock_status = "IN_STOCK"
+            
+            # 2. テキストによる予備判定 (以前のロジック)
+            if stock_status == "SOLD_OUT":
+                buy_btns = page.locator('text="購入手続きへ"')
+                btn_count = await buy_btns.count()
+                for i in range(btn_count):
+                    btn = buy_btns.nth(i)
+                    if await btn.is_visible():
+                        is_disabled = await btn.evaluate('el => el.disabled || el.hasAttribute("disabled") || el.getAttribute("aria-disabled") === "true"')
+                        if not is_disabled:
+                            stock_status = "IN_STOCK"
+                            break
+            
+            # 3. 売り切れ表示（画像上のSOLDなど）による確定判定 (優先度最高)
+            sold_indicators = [
+                'mer-item-thumbnail[sticker="sold"]',
+                'mer-sticker[sticker="sold"]',
+                '[aria-label="売り切れ"]',
+                '.item-thumbnail-sticker-sold'
+            ]
+            for selector in sold_indicators:
+                try:
+                    if await page.locator(selector).count() > 0:
+                        stock_status = "SOLD_OUT"
                         break
-            try:
-                sold_badge = page.locator('mer-item-thumbnail[sticker="sold"]')
-                if await sold_badge.count() > 0: stock_status = "SOLD_OUT"
-            except: pass
+                except: pass
+            
             await page.close()
             return {"url": url, "success": True, "is_fleamarket": self.is_fleamarket, "price": price, "status": stock_status}
         except Exception as e:
@@ -491,7 +516,7 @@ async def auto_download_shopee(page: Page, download_dir: str) -> str:
         raise ShopeeLoginRequiredError("Shopeeへのログインが必要です。")
 
     try:
-        await page.wait_for_selector("text='Sales Info'", timeout=30000)
+        await page.wait_for_selector("text='Sales Info'", timeout=60000)
     except Exception:
         if "login" in page.url:
             raise ShopeeLoginRequiredError("Shopeeへのログインが必要です。")
@@ -541,7 +566,7 @@ class ShopeeStockChecker:
             "www.yodobashi.com": 1,
         }
 
-    async def run_full_cycle(self, progress_callback=None, skip_price_update=False):
+    async def run_full_cycle(self, progress_callback=None, skip_price_update=False, existing_file=None):
         # ===============================================
         # Phase 2-1: フリマ系とEC系でブラウザを分離
         # ===============================================
@@ -559,22 +584,25 @@ class ShopeeStockChecker:
             shopee_browser = await p.chromium.launch_persistent_context(
                 user_data_dir=self.user_data_dir,
                 headless=self.headless,
-                args=["--disable-blink-features=AutomationControlled"]
+                ignore_https_errors=True,
+                args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-dev-shm-usage"]
             )
             # フリマ系用ブラウザ（高並列・低待機）
             browser_fleamarket = await p.chromium.launch(headless=self.headless,
                 args=["--disable-blink-features=AutomationControlled"])
             ctx_fleamarket = await browser_fleamarket.new_context(
-                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                locale="ja-JP"
+                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+                locale="ja-JP",
+                ignore_https_errors=True
             )
             await ctx_fleamarket.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
             # EC系用ブラウザ（低並列・高待機・Bot検知対策強化）
             browser_ec = await p.chromium.launch(headless=self.headless,
                 args=["--disable-blink-features=AutomationControlled"])
             ctx_ec = await browser_ec.new_context(
-                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                locale="ja-JP"
+                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+                locale="ja-JP",
+                ignore_https_errors=True
             )
             await ctx_ec.add_init_script("""
                 Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
@@ -585,8 +613,13 @@ class ShopeeStockChecker:
 
             try:
                 page = shopee_browser.pages[0] if shopee_browser.pages else await shopee_browser.new_page()
-                if progress_callback: progress_callback("Shopeeから最新データを取得中...", 0, 100)
-                latest_file = await auto_download_shopee(page, self.download_dir)
+                
+                if existing_file:
+                    latest_file = existing_file
+                else:
+                    if progress_callback: progress_callback("Shopeeから最新データを取得中...", 0, 100)
+                    latest_file = await auto_download_shopee(page, self.download_dir)
+                
                 wb = openpyxl.load_workbook(latest_file)
                 ws = wb.active
                 tasks = self._extract_tasks(ws)
@@ -639,7 +672,13 @@ class ShopeeStockChecker:
                                 return await ScraperFactory.get_scraper(url, ctx).check_stock(url)
                         url_cache[url] = asyncio.create_task(_do())
                     res = await url_cache[url]
-                    item_res = {"row_num": task["row_num"], "display_id": task["display_id"], "result": res}
+                    item_res = {
+                        "row_num": task["row_num"], 
+                        "display_id": task["display_id"], 
+                        "sku_col": task.get("sku_col"), # SKU列のインデックスを引き継ぐ
+                        "current_stock": task.get("current_stock", 0),
+                        "result": res
+                    }
                     processed_results.append(item_res)
                     count = len(processed_results)
                     if progress_callback:
@@ -667,7 +706,7 @@ class ShopeeStockChecker:
 
                 if progress_callback: progress_callback("結果をExcelに保存中...", total, total, processed_results)
                 output_path, summary = self._save_results(wb, ws, processed_results, skip_price_update=skip_price_update)
-                return output_path, summary, page
+                return output_path, summary, page, processed_results
             finally:
                 await ctx_fleamarket.close()
                 await ctx_ec.close()
@@ -679,12 +718,14 @@ class ShopeeStockChecker:
     def _extract_tasks(self, ws):
         sku_cols = []
         product_id_col = None
+        stock_col = None
         for row in ws.iter_rows(min_row=1, max_row=5):
             for cell in row:
                 if cell.value and isinstance(cell.value, str):
                     v = cell.value.strip().lower()
                     if v in ("sku", "parent sku", "variant sku"): sku_cols.append(cell.column)
                     elif v == "product id": product_id_col = cell.column
+                    elif v == "stock": stock_col = cell.column
         tasks = []
         for row in ws.iter_rows(min_row=1, max_row=ws.max_row):
             url, cell_sku, sku_cell = "", "", None
@@ -699,7 +740,21 @@ class ShopeeStockChecker:
                         break
             if not url: continue
             pid = str(row[product_id_col-1].value) if product_id_col and row[product_id_col-1].value else ""
-            tasks.append({"row_num": sku_cell.row, "url": url, "display_id": pid if pid else cell_sku})
+            
+            # 在庫数の取得
+            raw_stock = row[stock_col-1].value if stock_col else 0
+            try:
+                curr_stock = int(float(str(raw_stock))) if raw_stock is not None else 0
+            except (ValueError, TypeError):
+                curr_stock = 0
+
+            tasks.append({
+                "row_num": sku_cell.row, 
+                "sku_col": sku_cell.column, # URLが書かれていた列番号を記録
+                "url": url, 
+                "display_id": pid if pid else cell_sku,
+                "current_stock": curr_stock
+            })
         return tasks
 
     def _save_results(self, wb, ws, results, skip_price_update=False):
@@ -735,23 +790,48 @@ class ShopeeStockChecker:
 
     def save_manual_results(self, wb, ws, edited_df_as_dict, skip_price_update=False):
         stock_col, price_col = None, None
+        weight_col, length_col, width_col, height_col = None, None, None, None
+        
         for row in ws.iter_rows(min_row=1, max_row=5):
             for cell in row:
-                if cell.value == "Stock": stock_col = cell.column
-                elif cell.value == "Price": price_col = cell.column
+                if not cell.value: continue
+                v = str(cell.value).strip().lower()
+                if v == "stock": stock_col = cell.column
+                elif v == "price": price_col = cell.column
+                elif "weight" in v and "package" in v: weight_col = cell.column
+                elif "length" in v or "dimension (l)" in v: length_col = cell.column
+                elif "width" in v or "dimension (w)" in v: width_col = cell.column
+                elif "height" in v or "dimension (h)" in v: height_col = cell.column
 
         stats = {"total": len(edited_df_as_dict), "updated": 0}
         for item in edited_df_as_dict:
             row_num = item.get("row_num")
+            sku_col = item.get("sku_col")
             if not row_num: continue
             
             is_in_stock = item.get("在庫あり")
             if is_in_stock is None:
                 is_in_stock = (item.get("ステータス") == "IN_STOCK")
 
+            # 販売サイト(URL)の更新
+            new_url = item.get("販売サイト")
+            if new_url and sku_col:
+                sku_val = new_url.replace("https://", "").replace("http://", "")
+                ws.cell(row=row_num, column=sku_col).value = sku_val
+
+            # 重量・サイズの更新
+            if weight_col and item.get("重量"): ws.cell(row=row_num, column=weight_col).value = item["重量"]
+            if length_col and item.get("長さ"): ws.cell(row=row_num, column=length_col).value = item["長さ"]
+            if width_col and item.get("幅"): ws.cell(row=row_num, column=width_col).value = item["幅"]
+            if height_col and item.get("高さ"): ws.cell(row=row_num, column=height_col).value = item["高さ"]
+
             manual_shopee_price = item.get("出品価格(直接)")
             purchase_price = item.get("仕入価格")
             is_fleamarket = item.get("is_fleamarket", False)
+            
+            # 手動での調整値を反映
+            input_margin = item.get("利益率") # 0.4 などの割合
+            input_shipping = item.get("経費") # 1800 などの円
 
             if not is_in_stock:
                 if stock_col: ws.cell(row=row_num, column=stock_col).value = 0
@@ -763,7 +843,11 @@ class ShopeeStockChecker:
                     if manual_shopee_price and manual_shopee_price > 0:
                         final_price = manual_shopee_price
                     elif purchase_price and purchase_price > 0:
-                        final_price = FinanceCalculator.calculate_shopee_price(purchase_price, is_fleamarket)
+                        # 利益率と経費が指定されていればそれを使用、なければデフォルトを使用
+                        m = input_margin if input_margin is not None else 0.4327
+                        s = input_shipping if input_shipping is not None else 1800
+                        final_price = FinanceCalculator.calculate_shopee_price(purchase_price, is_fleamarket, shipping=s, margin_rate=m)
+                    
                     if price_col and final_price > 0:
                         ws.cell(row=row_num, column=price_col).value = final_price
             stats["updated"] += 1
